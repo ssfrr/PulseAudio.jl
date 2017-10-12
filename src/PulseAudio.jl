@@ -1,6 +1,7 @@
 # -*- mode: julia; -*-
 module PulseAudio
 using Reexport
+using FixedPointNumbers
 # reexport so users automatically get SampledSignals API
 @reexport using SampledSignals
 
@@ -20,6 +21,16 @@ const PA_SAMPLE_S24LE     =  9 # Signed 24 Bit PCM packed, little endian (PC). \
 const PA_SAMPLE_S24BE     = 10 # Signed 24 Bit PCM packed, big endian. \since 0.9.15
 const PA_SAMPLE_S24_32LE  = 11 # Signed 24 Bit PCM in LSB of 32 Bit words, little endian (PC). \since 0.9.15
 const PA_SAMPLE_S24_32BE  = 12 # Signed 24 Bit PCM in LSB of 32 Bit words, big endian. \since 0.9.15
+
+# map julia types onto PulseAudio stream types
+# yep, we're just assuming little-endianness
+specformat(::Type{Float32}) = PA_SAMPLE_FLOAT32LE
+specformat(::Type{UInt8}) = PA_SAMPLE_U8
+specformat(::Type{Int16}) = PA_SAMPLE_S16LE
+specformat(::Type{Fixed{Int16, 15}}) = PA_SAMPLE_S16LE
+specformat(::Type{Int32}) = PA_SAMPLE_S32LE
+specformat(::Type{Fixed{Int32, 31}}) = PA_SAMPLE_S32LE
+specformat(T) = error("Element type $T not supported")
 
 immutable pa_sample_spec
     format::Int32
@@ -85,11 +96,8 @@ mutable struct PulseAudioSink{T} <: SampleSink
     pulsesink::pa_simple
     spec::pa_sample_spec
 
-    function PulseAudioSink{T}() where T
-        # for now just set defaults
-        fs = 48000
-        ch = 2
-        eltype = PA_SAMPLE_FLOAT32LE
+    function PulseAudioSink{T}(ch, fs, name, description) where T
+        eltype = specformat(T)
 
         spec = pa_sample_spec(eltype, fs, ch)
         s = ccall((:pa_simple_new, LibPulseSimple),
@@ -98,10 +106,10 @@ mutable struct PulseAudioSink{T} <: SampleSink
                    Ptr{pa_sample_spec}, Ptr{pa_channel_map}, Ptr{pa_buffer_attr},
                    Ptr{Cint}),
                   C_NULL, # Use the default server
-                  "Julia",  # Application name
+                  name,  # Application name
                   PA_STREAM_PLAYBACK,
                   C_NULL, # Use the default device
-                  "PulseAudioSink", # description of stream
+                  description, # description of stream
                   Ref(spec),
                   C_NULL, # Use default channel map
                   C_NULL, # Use default buffering attributes
@@ -117,7 +125,25 @@ mutable struct PulseAudioSink{T} <: SampleSink
     end
 end
 
-PulseAudioSink() = PulseAudioSink{Float32}()
+"""
+    PulseAudioSink(; channels=2, samplerate=48000, eltype=Float32,
+                   name="Julia", description="PulseAudioSink")
+
+Create an audio sink that you can write to. The sink is samplerate-aware and
+interoperates with the SampledSignals ecosystem, so channel mapping and
+samplerate conversion are handled automatically.
+
+Example:
+
+```
+sink = PulseAudioSink()
+write(sink, sin.(2pi*220*linspace(0,1,48000))*0.2)
+```
+"""
+function PulseAudioSink(; channels=2, samplerate=48000, eltype=Float32,
+                        name="Julia", description="PulseAudioSink")
+    PulseAudioSink{eltype}(channels, samplerate, name, description)
+end
 
 SampledSignals.nchannels(sink::PulseAudioSink) = Int(sink.spec.channels)
 SampledSignals.samplerate(sink::PulseAudioSink) = Float64(sink.spec.rate)
@@ -134,7 +160,7 @@ end
 
 function SampledSignals.unsafe_write(sink::PulseAudioSink, buf::Array,
                                      frameoffset, framecount)
-    # pulseaudio wants interleaved data, so swap axes
+    # pulseaudio wants interleaved data, so transpose
     data = buf[(1:framecount) + frameoffset, :]'
     write_ret = ccall((:pa_simple_write, LibPulseSimple),
                       Cint,
@@ -144,13 +170,6 @@ function SampledSignals.unsafe_write(sink::PulseAudioSink, buf::Array,
         error("pa_simple_write failed with $write_ret")
     end
 
-    # # wait for the audio to finish playing
-    # drain_ret = ccall((:pa_simple_drain, LibPulseSimple),
-    #                   Cint,
-    #                   (pa_simple, Ptr{Cint}), sink.pulsesink, C_NULL)
-    # if drain_ret != 0
-    #     error("pa_simple_drain failed with $drain_ret")
-    # end
     return framecount
 end
 

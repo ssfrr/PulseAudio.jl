@@ -15,21 +15,27 @@ PulseAudio.jl supports the [SampledSignals.jl](https://github.com/JuliaAudio/Sam
 Examples
 --------
 
-### A simple pass-through amplifier:
+### Hear a test tone:
 
 ```julia
-src = PulseAudioSource("Gain")
-sink = PulseAudioSink("Gain")
-while true
-    write(sink, read(src, 2048)*2)
-end
+sig = sin.(2pi*330*linspace(0, 0.5, 0.5*48000)) * 0.2;
+sink = PulseAudioSink()
+write(sink, sig)
 ```
 
 ### Play a file:
 
 ```julia
 buf = load("somefile.wav")
-sink = PulseAudioSink("Player")
+sink = PulseAudioSink()
 # if the samplerates don't match the data will be transparently resampled
+write(sink, buf)
+```
+
+### Listen to the same file downsampled
+
+```julia
+buf = load("somefile.wav")
+sink = PulseAudioSink(name="Downsampled", description="8kHz", samplerate=8000)
 write(sink, buf)
 ```
