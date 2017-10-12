@@ -1,7 +1,10 @@
 # -*- mode: julia; -*-
-module WAVPlay
-import WAV.wavplay
-using Compat
+module PulseAudio
+using Reexport
+# reexport so users automatically get SampledSignals API
+@reexport using SampledSignals
+
+export PulseAudioSink
 
 # typedef enum pa_sample_format
 const PA_SAMPLE_U8        =  0 # Unsigned 8 Bit PCM
@@ -78,60 +81,77 @@ const PA_STREAM_PLAYBACK = 1
 const PA_CHANNEL_MAP_AIFF = 0
 const PA_CHANNEL_MAP_DEFAULT = PA_CHANNEL_MAP_AIFF
 
-function wavplay(data, fs)
-    const nChannels = size(data,2)
-    ss = pa_sample_spec(PA_SAMPLE_FLOAT32LE, fs, nChannels)
+mutable struct PulseAudioSink{T} <: SampleSink
+    pulsesink::pa_simple
+    spec::pa_sample_spec
 
-    # Manually layout the samples.
-    # convert doesn't lay out the samples as pulse audio expects
-    samples = Array{Float32, 1}(size(data, 1) * size(data, 2))
-    idx = 1
-    for i = 1:size(data, 1)
-        for j = 1:size(data, 2)
-            samples[idx] = convert(Float32, data[i, j])
-            idx += 1
+    function PulseAudioSink{T}() where T
+        # for now just set defaults
+        fs = 48000
+        ch = 2
+        eltype = PA_SAMPLE_FLOAT32LE
+
+        spec = pa_sample_spec(eltype, fs, ch)
+        s = ccall((:pa_simple_new, LibPulseSimple),
+                  pa_simple,
+                  (Cstring, Cstring, Cint, Cstring, Cstring,
+                   Ptr{pa_sample_spec}, Ptr{pa_channel_map}, Ptr{pa_buffer_attr},
+                   Ptr{Cint}),
+                  C_NULL, # Use the default server
+                  "Julia",  # Application name
+                  PA_STREAM_PLAYBACK,
+                  C_NULL, # Use the default device
+                  "PulseAudioSink", # description of stream
+                  Ref(spec),
+                  C_NULL, # Use default channel map
+                  C_NULL, # Use default buffering attributes
+                  C_NULL) # Ignore error code
+        if s == C_NULL
+            error("pa_simple_new failed")
         end
+
+        instance = new(s, spec)
+        finalizer(instance, close)
+
+        instance
+    end
+end
+
+PulseAudioSink() = PulseAudioSink{Float32}()
+
+SampledSignals.nchannels(sink::PulseAudioSink) = Int(sink.spec.channels)
+SampledSignals.samplerate(sink::PulseAudioSink) = Float64(sink.spec.rate)
+Base.eltype(sink::PulseAudioSink{T}) where T = T
+
+function Base.close(sink::PulseAudioSink)
+    if sink.pulsesink != C_NULL
+        ccall((:pa_simple_free, LibPulseSimple), Void, (pa_simple,), sink.pulsesink)
+        sink.pulsesink = C_NULL
     end
 
-    s = ccall((:pa_simple_new, LibPulseSimple),
-              pa_simple,
-              (Cstring,
-               Cstring,
-               Cint,
-               Cstring,
-               Cstring,
-               Ptr{pa_sample_spec},
-               Ptr{pa_channel_map},
-               Ptr{pa_buffer_attr},
-               Ptr{Cint}),
-              C_NULL, # Use the default server
-              "Julia WAV.jl",  # Application name
-              PA_STREAM_PLAYBACK,
-              C_NULL, # Use the default device
-              "wavplay", # description of stream
-              &ss,
-              C_NULL, # Use default channel map
-              C_NULL, # Use default buffering attributes
-              C_NULL) # Ignore error code
-    if s == C_NULL
-        error("pa_simple_new failed")
-    end
+    nothing
+end
 
+function SampledSignals.unsafe_write(sink::PulseAudioSink, buf::Array,
+                                     frameoffset, framecount)
+    # pulseaudio wants interleaved data, so swap axes
+    data = buf[(1:framecount) + frameoffset, :]'
     write_ret = ccall((:pa_simple_write, LibPulseSimple),
                       Cint,
                       (pa_simple, Ptr{Void}, Csize_t, Ptr{Cint}),
-                      s, samples, sizeof(samples), C_NULL)
+                      sink.pulsesink, data, sizeof(data), C_NULL)
     if write_ret != 0
         error("pa_simple_write failed with $write_ret")
     end
 
-    drain_ret = ccall((:pa_simple_drain, LibPulseSimple),
-                      Cint,
-                      (pa_simple, Ptr{Cint}), s, C_NULL)
-    if drain_ret != 0
-        error("pa_simple_drain failed with $drain_ret")
-    end
-
-    ccall((:pa_simple_free, LibPulseSimple), Void, (pa_simple,), s)
+    # # wait for the audio to finish playing
+    # drain_ret = ccall((:pa_simple_drain, LibPulseSimple),
+    #                   Cint,
+    #                   (pa_simple, Ptr{Cint}), sink.pulsesink, C_NULL)
+    # if drain_ret != 0
+    #     error("pa_simple_drain failed with $drain_ret")
+    # end
+    return framecount
 end
+
 end # module
